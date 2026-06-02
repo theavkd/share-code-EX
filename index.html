@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kei & Hiro Autonomous IDE - V3.3.2</title>
+    <style>
+        :root {
+            --bg-color: #1e1e1e;
+            --sidebar-bg: #252526;
+            --tab-bg: #2d2d2d;
+            --tab-active: #1e1e1e;
+            --text-color: #d4d4d4;
+            --accent-color: #9cdcfe;
+            --button-bg: #0e639c;
+            --danger-color: #a61c1c;
+            --tree-line: #444;
+        }
+        body { margin: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: var(--bg-color); color: var(--text-color); display: flex; height: 100vh; overflow: hidden; }
+        
+        #sidebar { width: 280px; background-color: var(--sidebar-bg); border-right: 1px solid #3c3c3c; display: flex; flex-direction: column; padding: 10px; box-sizing: border-box; }
+        .btn-group { display: flex; gap: 5px; margin-bottom: 10px; }
+        button { background-color: var(--button-bg); color: white; border: none; padding: 8px; cursor: pointer; font-weight: bold; border-radius: 4px; }
+        #workspace-btn { flex: 2; }
+        .tool-btn { padding: 4px 8px; font-size: 12px; background-color: #444; }
+        
+        #tree-view { flex: 1; overflow-y: auto; font-size: 14px; }
+        .tree-node { margin-left: 12px; margin-top: 6px; position: relative; }
+        .folder-container { border-left: 1px solid var(--tree-line); margin-left: 5px; padding-left: 10px; }
+        .folder-container.collapsed { display: none; }
+        .folder-header { display: flex; align-items: center; justify-content: space-between; font-weight: bold; color: #e0e0e0; cursor: pointer; padding: 2px; }
+        .folder-title { display: flex; align-items: center; gap: 4px; }
+        .arrow-icon { font-size: 10px; display: inline-block; width: 12px; transition: transform 0.1s ease; color: #858585; }
+
+        .file-item { display: flex; align-items: center; justify-content: space-between; width: 100%; margin-left: 16px; padding: 2px; }
+        .file-label { display: flex; align-items: center; gap: 5px; cursor: pointer; flex: 1; }
+        .node-actions { display: none; gap: 3px; }
+        .tree-node:hover > .folder-header .node-actions, .file-item:hover .node-actions { display: flex; }
+        .action-icon { cursor: pointer; padding: 2px 4px; border-radius: 3px; font-size: 11px; background: #333; }
+        .action-icon:hover { background: var(--button-bg); }
+        .delete-icon:hover { background: var(--danger-color); }
+
+        #main-content { flex: 1; display: flex; flex-direction: column; }
+        #tab-bar { display: flex; background-color: var(--tab-bg); overflow-x: auto; border-bottom: 1px solid #3c3c3c; }
+        .tab { padding: 8px 16px; background-color: var(--tab-bg); border-right: 1px solid #3c3c3c; cursor: pointer; display: flex; align-items: center; gap: 8px; font-size: 13px; }
+        .tab.active { background-color: var(--tab-active); border-bottom: 2px solid var(--accent-color); color: #fff; }
+        #editor-container { flex: 1; position: relative; }
+        #code-blackboard { width: 100%; height: 100%; background-color: var(--bg-color); color: #d4d4d4; font-family: 'Consolas', monospace; font-size: 16px; border: none; padding: 15px; box-sizing: border-box; resize: none; outline: none; }
+        #action-bar { padding: 10px; background-color: var(--sidebar-bg); display: flex; justify-content: flex-end; gap: 10px; border-top: 1px solid #3c3c3c; }
+    </style>
+</head>
+<body>
+    <div id="sidebar">
+        <div class="btn-group">
+            <button id="workspace-btn" onclick="connectWorkspace()">📂 Mở Dự Án</button>
+            <button class="tool-btn" onclick="createNewNode(directoryHandle, 'file')">📄 +File</button>
+            <button class="tool-btn" onclick="createNewNode(directoryHandle, 'dir')">📁 +Folder</button>
+        </div>
+        <div id="tree-view">// Chưa kết nối thư mục...</div>
+    </div>
+    <div id="main-content">
+        <div id="tab-bar"></div>
+        <div id="editor-container"><textarea id="code-blackboard" placeholder="// ..."></textarea></div>
+        <div id="action-bar"><span id="kei-status" style="margin-right: auto; color: #858585; font-size: 14px; align-self: center;">V3.3.2 Sẵn sàng...</span></div>
+    </div>
+
+    <script>
+        let virtualDOM = {}; 
+        let directoryHandle = null;
+        let currentOpenedFile = null;
+        let folderStates = {}; 
+        const blackboard = document.getElementById('code-blackboard');
+        let isFocused = false; let isTyping = false;
+
+        async function connectWorkspace() {
+            try {
+                directoryHandle = await window.showDirectoryPicker();
+                await refreshWorkspace(true);
+                startBackgroundWatchers();
+            } catch (err) { alert("Cấp quyền truy cập!"); }
+        }
+
+        async function refreshWorkspace(fullRefresh) {
+            if (fullRefresh) {
+                const treeView = document.getElementById('tree-view');
+                treeView.innerHTML = '';
+                await scanDirectory(directoryHandle, treeView, "");
+            }
+        }
+
+        async function scanDirectory(dirHandle, parentElement, relativePath) {
+            for await (const entry of dirHandle.values()) {
+                const currentPath = relativePath ? `${relativePath}/${entry.name}` : entry.name;
+                const node = document.createElement('div');
+                node.className = 'tree-node';
+
+                if (entry.kind === 'file') {
+                    node.innerHTML = `<div class="file-item"><label class="file-label"><input type="checkbox" onchange="toggleFile('${currentPath}', this.checked)"> 📄 ${entry.name}</label><div class="node-actions"><span class="action-icon delete-icon">🗑️</span></div></div>`;
+                    if(!virtualDOM[currentPath]) virtualDOM[currentPath] = { handle: entry, content: await (await entry.getFile()).text() };
+                    node.querySelector('.file-label').onclick = () => switchToFile(currentPath);
+                } else {
+                    const collapsed = !!folderStates[currentPath];
+                    node.innerHTML = `<div class="folder-header" onclick="patchFolder('${currentPath}', this)"><div class="folder-title"><span class="arrow-icon">${collapsed ? '▶' : '▼'}</span> 📁 <strong>${entry.name}</strong></div><div class="node-actions"><span class="action-icon">+</span><span class="action-icon delete-icon">🗑️</span></div></div><div class="folder-container ${collapsed ? 'collapsed' : ''}"></div>`;
+                    await scanDirectory(entry, node.querySelector('.folder-container'), currentPath);
+                }
+                parentElement.appendChild(node);
+            }
+        }
+
+        // Logic Patching V3.3.2 - Thay thế hoàn toàn việc xóa cây cũ
+        function patchFolder(path, headerEl) {
+            folderStates[path] = !folderStates[path];
+            headerEl.nextElementSibling.classList.toggle('collapsed');
+            headerEl.querySelector('.arrow-icon').innerText = folderStates[path] ? '▶' : '▼';
+        }
+
+        function toggleFile(path, checked) {
+            virtualDOM[path].isChecked = checked;
+            renderTabs();
+        }
+
+        function renderTabs() {
+            const tabBar = document.getElementById('tab-bar');
+            tabBar.innerHTML = '';
+            Object.keys(virtualDOM).filter(p => virtualDOM[p].isChecked).forEach(path => {
+                const tab = document.createElement('div');
+                tab.className = `tab ${currentOpenedFile === path ? 'active' : ''}`;
+                tab.innerText = path.split('/').pop();
+                tab.onclick = () => switchToFile(path);
+                tabBar.appendChild(tab);
+            });
+        }
+
+        function switchToFile(path) {
+            currentOpenedFile = path;
+            blackboard.value = virtualDOM[path].content;
+            renderTabs();
+        }
+
+        async function saveFileToLocal(fileName, content) {
+            const handle = virtualDOM[fileName].handle;
+            const writable = await handle.createWritable();
+            await writable.write(content);
+            await writable.close();
+        }
+
+        function startBackgroundWatchers() {
+            setInterval(async () => {
+                if (!currentOpenedFile || !virtualDOM[currentOpenedFile]) return;
+                try {
+                    const freshContent = await (await virtualDOM[currentOpenedFile].handle.getFile()).text();
+                    if (freshContent !== blackboard.value) {
+                        virtualDOM[currentOpenedFile].content = freshContent;
+                        const start = blackboard.selectionStart, end = blackboard.selectionEnd;
+                        blackboard.value = freshContent;
+                        blackboard.setSelectionRange(start, end);
+                    }
+                } catch (err) { console.error("Lỗi mắt thần:", err); }
+            }, 1500);
+
+            setInterval(async () => {
+                if (isFocused || isTyping || !directoryHandle) return;
+                await refreshWorkspace(false); 
+            }, 4000);
+        }
+
+        async function createNewNode(parentHandle, type) {
+            if (!parentHandle) return alert("Chưa mở dự án!");
+            const name = prompt(`Nhập tên ${type === 'file' ? 'file' : 'thư mục'} mới:`);
+            if (!name) return;
+            try {
+                if (type === 'file') await parentHandle.getFileHandle(name, { create: true });
+                else await parentHandle.getDirectoryHandle(name, { create: true });
+                await refreshWorkspace(true);
+            } catch (err) { console.error(err); }
+        }
+
+        window.addEventListener('message', function(event) {
+            const { action, fileName, suggestedCode } = event.data;
+            if (action === 'kei_push_code' && virtualDOM[fileName]) {
+                blackboard.value = suggestedCode;
+                document.getElementById('kei-status').innerText = `Kei vừa đẩy code vào ${fileName}!`;
+            }
+        });
+    </script>
+</body>
+</html>
